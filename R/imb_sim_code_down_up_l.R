@@ -1,0 +1,697 @@
+##################################
+#DownSampling, UpSampling y SMOTE#
+##################################
+rm(list=ls())
+library(MASS) # LDA
+library(e1071)# SVM
+
+library(rpart) # CART
+#library(tree)  # CART
+library(randomForest) # RandomForest
+source("functions_mcv3.R") # SAMME  You should copy this script in your working directory
+
+#install.packages("pROC")
+library(pROC)#ROC y AUC
+
+
+
+#############################################################################################################################
+#############################################################################################################################
+## DATOS SIMULADOS PARA USAR COMO EJEMPLO - Tshiribarni ISRL pg 315
+#############################################################################################################################
+#############################################################################################################################
+Nobs<- 200
+set.seed(69)
+datay<-sample(letters[1:2], Nobs,replace=T, prob=c(0.10,0.90))
+datax<-matrix(runif(Nobs*4,-1,1),ncol=4,nrow=Nobs)
+
+## Datos no lineales
+sel1<-which(datax[,1]>0.5 & datax[,2]>0.5)   #A
+sel2<-which(datax[,1]<0.5)                   #B
+sel3<-which(datax[,2]<0.5)                   #B
+
+if(length(sel1)>0) 		datay[sel1]<-      "a"
+if(length(c(sel2)>0)) 	        datay[sel2]<-      "b"
+if(length(sel3)>0) 		datay[sel3]<-      "b"
+
+## ADD some noise (change majority class to minority class to avoid perfect classification)
+set.seed(69)
+selb<-which(datay=="b")
+datay[selb[sample(selb,3)]]<-"a" 
+
+coly<-as.factor(datay)
+levels(coly)<- c("red","green")
+
+## Datos lineales
+datayl<-datay
+sel1l<-which(datax[,1]<datax[,2])   				#B
+sel2l<-which(datax[,1]>datax[,2] & datax[,1]-datax[,2]<1) 	#B
+sel3l<-which(datax[,1]>datax[,2] & datax[,1]-datax[,2]>1) 	#A
+
+if(length(sel1l)>0) datayl[sel1l]<- "b"
+if(length(sel2l)>0) datayl[sel2l]<- "b"
+if(length(sel3l)>0) datayl[sel3l]<- "a"
+
+## ADD some noise (change majority class to minority class to avoid perfect classification)
+set.seed(69)
+selbl<-which(datayl=="b")
+datayl[selbl[sample(selbl,3)]]<- "a"
+
+
+colyl<-as.factor(datayl)
+levels(colyl)<- c("red","green")
+
+## FIGURE Structure of simulated data
+
+#pdf("FIGURAS/Figure_3_simulatedData.pdf", height=8, width=8)
+x11(); 
+par(mfrow=c(2,2))
+plot(datax[,1],datax[,2], pch=datayl, col=as.character(colyl),xlab="", ylab="", cex.lab=1.5)
+mtext(expression(x^(1)),1,line=3, cex=1.5)
+mtext(expression(x^(2)),2,line=2, cex=1.5)
+title("Linear data (L set)")
+abline(a=-1,b=1,lty=2)
+
+plot(datax[,1],datax[,2], pch=datay, col=as.character(coly),xlab="", ylab="")
+mtext(expression(x^(1)),1,line=3, cex=1.5)
+mtext(expression(x^(2)),2,line=2, cex=1.5)
+title("Non-linear data (NL set)")
+abline(h=0.5,v=0.5,lty=2)
+
+plot(datax[,1],datax[,3], pch=datayl, col=as.character(colyl),xlab="", ylab="")
+mtext(expression(x^(1)),1,line=3, cex=1.5)
+mtext(expression(x^(3)),2,line=2, cex=1.5)
+
+plot(datax[,1],datax[,3], pch=datay, col=as.character(coly),xlab="", ylab="")
+mtext(expression(x^(1)),1,line=3, cex=1.5)
+mtext(expression(x^(3)),2,line=2, cex=1.5)
+
+dev.off()
+#http://stats.stackexchange.com/questions/92157/compute-and-graph-the-lda-decision-boundary
+
+
+datax 
+table(datay)
+table(datayl)
+
+
+
+
+##############
+#DownSampling#
+##############
+
+library(DMwR)
+library(caret)
+simul_data_l<-data.frame(datayl,datax) # 
+
+errores_l=as.list(0)
+nbiter=300
+
+nsim=100 # numero de simulaciones para evaluar distribucion de errores
+
+ERRORESl<-matrix(NaN, ncol=6, nrow=nsim) # modelos x simulaciones
+AUCsl<-matrix(NaN, ncol=6, nrow=nsim) # Matrix con las Areas bajo la curva
+TP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por TP_fun
+FP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por FP_fun
+
+CUTOFF=0.5
+ksamme=numeric()
+
+for(k in 1:nsim){
+  
+  print(k)
+  n=nrow(simul_data_l)
+  s=sample(n,n/3)
+  dlearn=simul_data_l[-s,]
+  
+  ## AGREGA downSample
+  dlearn=downSample(x = dlearn[,-1],y=dlearn[,1])
+  dlearn<-dlearn[,c(ncol(dlearn):1)]
+  colnames(dlearn)[1]<-"datayl"
+  cl=dlearn[,1]
+  dtest=simul_data_l[s,]
+  dtest=dtest[complete.cases(dtest),]
+  yobstst=dtest[ ,1]
+  yobstst=as.numeric(yobstst)
+  
+  #DISCRIMINANT ANALYSIS
+  lda_error<-tryCatch(lda(datayl~.,data=dlearn),error=function(e)e,finally="ERROR") # si da error, la prediccion es 0
+  
+  if(any(class(lda_error)=="error")){evdis=rep(0, nrow(dtest)) } else {
+    dis=lda(datayl~.,data=dlearn); 
+    pr.dis<-as.numeric(predict(dis,newdata=dtest,type="prob")$posterior[,"a"])
+    evdis=numeric()#as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+    evdis[pr.dis > CUTOFF]<- 1
+    evdis[pr.dis <= CUTOFF]<- 2 # Acomoda para que las clases sean clasificadas como 1 o 2 segun el cutoff
+    #evdis=as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+  }# When error, assume error in all predictions. Caused by error in lda because no variance
+  
+  #LR
+  glm1<-stepAIC(glm(datayl~., data=dlearn,family=binomial(link="logit")),trace=0)
+  pr.glm<-predict(glm1, newdata=dtest[,-1],type="response")
+  evglm<-numeric()
+  evglm[pr.glm >  CUTOFF]<-2
+  evglm[pr.glm <= CUTOFF]<-1
+  
+  
+  #SVM
+  svmaa=tune(svm,train.x=dlearn[,-1],train.y=dlearn[,1],data=dlearn[,-1])
+  svma=svm(dlearn[,1]~.,data=dlearn[,-1],cost=svmaa$best.model$cost,gamma=svmaa$best.model$gamma,probability=TRUE)
+  pr.svm<- as.numeric(attributes(predict(svma,newdata=dtest,probability=TRUE))$probabilities[,"a"])# Probability for class 1
+  evsvm<-numeric()
+  evsvm[pr.svm > CUTOFF]<-1
+  evsvm[pr.svm <= CUTOFF]<-2
+  
+  #Non lineal
+  #CART
+  arbol=cart(dlearn,dtest,st=F,ms=5,cpopt=0.000001)
+  pr.cart<-arbol$probTest
+  ecart<-numeric()
+  ecart[pr.cart >  CUTOFF]<-1
+  ecart[pr.cart <= CUTOFF]<-2
+  
+  #SAMME
+  
+  samme_error<-tryCatch(lastsamme(dlearn,dtest,nbiter=300,st=F,ms=5,cpopt=0,cutoff=CUTOFF),error=function(e)e,finally="ERROR") 
+  
+  if(any(class(samme_error)=="error")){evsamme=rep(2, nrow(dtest));ksamme=c(ksamme,k) } else {
+    evsamme=samme_error$prevtst}
+  
+  
+  #samme=lastsamme(dlearn,dtest,nbiter=300,st=F,ms=5,cpopt=0.00001,cutoff=CUTOFF) 
+  #evsamme=samme$prevtst
+  
+  #RANDOM FOREST SIMPLE
+  rf=randomForest(y=dlearn[,1],x=dlearn[,-1],data=dlearn,ntree=1000)
+  pr.rf= as.numeric(predict(rf,newdata=dtest,type="prob")[,"a"])
+  evrf<-numeric()
+  evrf[pr.rf >0.5]<-1
+  evrf[pr.rf <= 0.5]<-2 # Aqui no puse el CUTOFF por que sino el metodo es equivalente a rf_cutoff que esta abajo (sirve como una especie de control)
+  
+  
+  
+  ### CALCULOS DE CALIDAD DE AJUSTE
+  
+  errores_l=cbind(LDA=sum(evdis!=yobstst)/nrow(dtest),
+                  SVM=sum(evsvm!=yobstst)/nrow(dtest), 
+                  LR=sum(evglm!=yobstst)/nrow(dtest), 
+                  CART=sum(ecart!=yobstst)/nrow(dtest),
+                 SAMME=sum(evsamme!=yobstst)/nrow(dtest),
+                  RF=sum(evrf!=yobstst)/nrow(dtest))#
+  round(errores_l,2)
+  
+  ERRORESl[k,]<-errores_l
+  
+  # AUC
+  auc_l=c(auc(as.numeric(yobstst),evdis),
+          auc(as.numeric(yobstst),evsvm),
+          auc(as.numeric(yobstst),evglm),
+         auc(as.numeric(yobstst),evsamme),
+          auc(as.numeric(yobstst),ecart),
+          auc(as.numeric(yobstst),evrf))
+  AUCsl[k,]<-auc_l
+  
+  # TRUE POSITIVE
+  truePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$TPR, SVM=TP_fun(yobstst,evsvm)$TPR, 
+                        LR=TP_fun(yobstst,evglm)$TPR,CART=TP_fun(yobstst,ecart)$TPR, 
+                        SAMME=TP_fun(yobstst,evsamme)$TPR,
+                        RF=TP_fun(yobstst,evrf)$TPR)
+  TP_MATl[k,]<-truePositive_l
+  
+  falsePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$FPR, SVM=TP_fun(yobstst,evsvm)$FPR, LR=TP_fun(yobstst,evglm)$FPR,
+                         CART=TP_fun(yobstst,ecart)$FPR, 
+                         SAMME=TP_fun(yobstst,evsamme)$FPR, 
+                         RF=TP_fun(yobstst,evrf)$FPR)
+  FP_MATl[k,]<-falsePositive_l
+  
+  
+}# END LOOP      
+
+
+ModNames<-cbind("LDA", "SVM", "LR","CART", "SAMME", "RF")
+#ModNames<-cbind("LDA", "SVM", "LR","CART", "RF")
+
+
+
+MeanAcc<-apply(1-ERRORESl[1:42,], 2, mean)
+MeanAcc=round(MeanAcc,4)
+SDAcc<-round(apply(1-ERRORESl[1:42,], 2, sd),2)
+Acctab<-t(data.frame(paste(MeanAcc, SDAcc, sep="Ypm")))
+colnames(Acctab)=ModNames
+rownames(Acctab)=c("ACC")
+
+MeanTP_MAT<-apply(TP_MATl[1:42,], 2, mean)
+MeanTP_MAT=round(MeanTP_MAT,4)
+SDTP_MAT<-round(apply(TP_MATl[1:42,], 2, sd),2)
+TPRtab<-t(data.frame(paste(MeanTP_MAT, SDTP_MAT, sep="Ypm")))
+colnames(TPRtab)=ModNames
+rownames(TPRtab)=c("TPR")
+
+MeanFP_MAT<-apply(FP_MATl[1:42,], 2, mean)
+MeanFP_MAT=round(MeanFP_MAT,4)
+SDFP_MAT<-round(apply(FP_MATl[1:42,], 2, sd),2)
+FPRtab<-t(data.frame(paste(MeanFP_MAT, SDFP_MAT, sep="Ypm")))
+colnames(FPRtab)=ModNames
+rownames(FPRtab)=c("FPR")
+
+
+MeanAUC<-apply(AUCsl[1:42,], 2, mean)
+MeanAUC=round(MeanAUC,4)
+SDAUC<-round(apply(AUCsl[1:42,], 2, sd),2)
+AUCtab<-t(data.frame(paste(MeanAUC, SDAUC, sep="Ypm")))
+colnames(AUCtab)=ModNames
+rownames(AUCtab)=c("AUC")
+
+tabla_down=rbind(Acctab,AUCtab,TPRtab,FPRtab)
+
+
+fic = paste("resdown.txt",sep="")
+
+dump(paste("ERRORESl[1:89,]"),file=fic,append=T)
+dump(paste("TP_MATl[1:89,]"),file=fic,append=T)
+dump(paste("FP_MATl[1:89,]"),file=fic,append=T)
+dump(paste("AUCsl[1:89,]"),file=fic,append=T)
+dump(paste("tabla_down"),file=fic,append=T)
+
+
+xtable(tabla_down,caption = "Tabla down lineal")
+
+
+#################################################################
+
+
+
+
+
+
+
+x11(height=7, width=8)
+par(mfrow=c(3,1), mar=c(5,4,1,1))
+
+boxplot(ERRORESl, axes=FALSE, xlab="", ylab="Error rate", ylim=c(0,0.5)); axis(1, at=1:ncol(ERRORESl), labels=ModNames) 
+axis(2); box()
+abline(h=0.05, lty=2)
+
+boxplot(AUCsl,axes=FALSE, xlab="", ylab="AUC" ,ylim=c(0.5,1)); axis(1, at=1:ncol(AUCsl), labels=ModNames) 
+axis(2); box()
+
+boxplot(TP_MATl,axes=FALSE, xlab="Models", ylab="TRUE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(TP_MATl), labels=ModNames) 
+axis(2); box()
+
+boxplot(FP_MATl,axes=FALSE, xlab="Models", ylab="FALSE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(FP_MATl), labels=ModNames) 
+axis(2); box()
+
+
+dev.off()
+
+############
+#UpSampling#
+############
+
+errores_l=as.list(0)
+nbiter=300
+
+nsim=100 # numero de simulaciones para evaluar distribucion de errores
+
+ERRORESl<-matrix(NaN, ncol=6, nrow=nsim) # modelos x simulaciones
+AUCsl<-matrix(NaN, ncol=6, nrow=nsim) # Matrix con las Areas bajo la curva
+TP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por TP_fun
+FP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por FP_fun
+
+CUTOFF=0.5
+
+for(k in 1:nsim){
+  
+  print(k)
+  n=nrow(simul_data_l)
+  s=sample(n,n/3)
+  dlearn=simul_data_l[-s,]
+  
+  ## AGREGA upSample
+  dlearn=upSample(x = dlearn[,-1],y=dlearn[,1])
+  dlearn<-dlearn[,c(ncol(dlearn):1)]
+  colnames(dlearn)[1]<-"datayl"
+  cl=dlearn[,1]
+  dtest=simul_data_l[s,]
+  dtest=dtest[complete.cases(dtest),]
+  yobstst=dtest[ ,1]
+  yobstst=as.numeric(yobstst)
+  
+  #DISCRIMINANT ANALYSIS
+  lda_error<-tryCatch(lda(datayl~.,data=dlearn),error=function(e)e,finally="ERROR") # si da error, la prediccion es 0
+  
+  if(any(class(lda_error)=="error")){evdis=rep(0, nrow(dtest)) } else {
+    dis=lda(datayl~.,data=dlearn); 
+    pr.dis<-as.numeric(predict(dis,newdata=dtest,type="prob")$posterior[,"a"])
+    evdis=numeric()#as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+    evdis[pr.dis > CUTOFF]<- 1
+    evdis[pr.dis <= CUTOFF]<- 2 # Acomoda para que las clases sean clasificadas como 1 o 2 segun el cutoff
+    #evdis=as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+  }# When error, assume error in all predictions. Caused by error in lda because no variance
+  
+  #LR
+  glm1<-stepAIC(glm(datayl~., data=dlearn,family=binomial(link="logit")),trace=0)
+  pr.glm<-predict(glm1, newdata=dtest[,-1],type="response")
+  evglm<-numeric()
+  evglm[pr.glm >  CUTOFF]<-2
+  evglm[pr.glm <= CUTOFF]<-1
+  
+  
+  #SVM
+  svmaa=tune(svm,train.x=dlearn[,-1],train.y=dlearn[,1],data=dlearn[,-1])
+  svma=svm(dlearn[,1]~.,data=dlearn[,-1],cost=svmaa$best.model$cost,gamma=svmaa$best.model$gamma,probability=TRUE)
+  pr.svm<- as.numeric(attributes(predict(svma,newdata=dtest,probability=TRUE))$probabilities[,"a"])# Probability for class 1
+  evsvm<-numeric()
+  evsvm[pr.svm > CUTOFF]<-1
+  evsvm[pr.svm <= CUTOFF]<-2
+  
+  #Non lineal
+  #CART
+  arbol=cart(dlearn,dtest,st=F,ms=5,cpopt=0.000001)
+  pr.cart<-arbol$probTest
+  ecart<-numeric()
+  ecart[pr.cart >  CUTOFF]<-1
+  ecart[pr.cart <= CUTOFF]<-2
+  
+  #SAMME
+   samme=lastsamme(dlearn,dtest,nbiter=300,st=F,ms=5,cpopt=0.00001,cutoff=CUTOFF) 
+  evsamme=samme$prevtst
+  
+  #RANDOM FOREST SIMPLE
+  rf=randomForest(y=dlearn[,1],x=dlearn[,-1],data=dlearn,ntree=1000)
+  pr.rf= as.numeric(predict(rf,newdata=dtest,type="prob")[,"a"])
+  evrf<-numeric()
+  evrf[pr.rf >0.5]<-1
+  evrf[pr.rf <= 0.5]<-2 # Aqui no puse el CUTOFF por que sino el metodo es equivalente a rf_cutoff que esta abajo (sirve como una especie de control)
+  
+  
+  
+  ### CALCULOS DE CALIDAD DE AJUSTE
+  
+  errores_l=cbind(LDA=sum(evdis!=yobstst)/nrow(dtest),
+                  SVM=sum(evsvm!=yobstst)/nrow(dtest), 
+                  LR=sum(evglm!=yobstst)/nrow(dtest), 
+                  CART=sum(ecart!=yobstst)/nrow(dtest),
+                  SAMME=sum(evsamme!=yobstst)/nrow(dtest),
+                  RF=sum(evrf!=yobstst)/nrow(dtest))#
+  round(errores_l,2)
+  
+  ERRORESl[k,]<-errores_l
+  
+  # AUC
+  auc_l=c(auc(as.numeric(yobstst),evdis),
+          auc(as.numeric(yobstst),evsvm),
+          auc(as.numeric(yobstst),evglm),
+              auc(as.numeric(yobstst),evsamme),
+          auc(as.numeric(yobstst),ecart),
+          auc(as.numeric(yobstst),evrf))
+  AUCsl[k,]<-auc_l
+  
+  # TRUE POSITIVE
+  truePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$TPR, SVM=TP_fun(yobstst,evsvm)$TPR, 
+                        LR=TP_fun(yobstst,evglm)$TPR,CART=TP_fun(yobstst,ecart)$TPR, 
+                                            SAMME=TP_fun(yobstst,evsamme)$TPR,
+                        RF=TP_fun(yobstst,evrf)$TPR)
+  TP_MATl[k,]<-truePositive_l
+  
+  falsePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$FPR, SVM=TP_fun(yobstst,evsvm)$FPR, LR=TP_fun(yobstst,evglm)$FPR,
+                         CART=TP_fun(yobstst,ecart)$FPR, 
+                                           SAMME=TP_fun(yobstst,evsamme)$FPR, 
+                         RF=TP_fun(yobstst,evrf)$FPR)
+  FP_MATl[k,]<-falsePositive_l
+  
+  
+}# END LOOP      
+
+#ModNames<-cbind("LDA", "SVM", "LR","CART", "RF")
+ModNames<-cbind("LDA", "SVM", "LR","CART", "SAMME", "RF")
+
+
+
+MeanAcc<-apply(1-ERRORESl, 2, mean)
+MeanAcc=round(MeanAcc,4)
+SDAcc<-round(apply(1-ERRORESl, 2, sd),2)
+Acctab<-t(data.frame(paste(MeanAcc, SDAcc, sep="Ypm")))
+colnames(Acctab)=ModNames
+rownames(Acctab)=c("ACC")
+
+MeanTP_MAT<-apply(TP_MATl, 2, mean)
+MeanTP_MAT=round(MeanTP_MAT,4)
+SDTP_MAT<-round(apply(TP_MATl, 2, sd),2)
+TPRtab<-t(data.frame(paste(MeanTP_MAT, SDTP_MAT, sep="Ypm")))
+colnames(TPRtab)=ModNames
+rownames(TPRtab)=c("TPR")
+
+MeanFP_MAT<-apply(FP_MATl, 2, mean)
+MeanFP_MAT=round(MeanFP_MAT,4)
+SDFP_MAT<-round(apply(FP_MATl, 2, sd),2)
+FPRtab<-t(data.frame(paste(MeanFP_MAT, SDFP_MAT, sep="Ypm")))
+colnames(FPRtab)=ModNames
+rownames(FPRtab)=c("FPR")
+
+
+MeanAUC<-apply(AUCsl, 2, mean)
+MeanAUC=round(MeanAUC,4)
+SDAUC<-round(apply(AUCsl, 2, sd),2)
+AUCtab<-t(data.frame(paste(MeanAUC, SDAUC, sep="Ypm")))
+colnames(AUCtab)=ModNames
+rownames(AUCtab)=c("AUC")
+
+tabla_up=rbind(Acctab,AUCtab,TPRtab,FPRtab)
+
+
+fic = paste("resup.txt",sep="")
+
+dump(paste("ERRORESl"),file=fic,append=T)
+dump(paste("TP_MATl"),file=fic,append=T)
+dump(paste("FP_MATl"),file=fic,append=T)
+dump(paste("AUCsl"),file=fic,append=T)
+dump(paste("tabla_up"),file=fic,append=T)
+
+
+
+xtable(tabla_up,caption = "Tabla up lineal")
+
+
+
+x11(height=7, width=8)
+par(mfrow=c(3,1), mar=c(5,4,1,1))
+
+boxplot(ERRORESl, axes=FALSE, xlab="", ylab="Error rate", ylim=c(0,0.5)); axis(1, at=1:ncol(ERRORESl), labels=ModNames) 
+axis(2); box()
+abline(h=0.05, lty=2)
+
+boxplot(AUCsl,axes=FALSE, xlab="", ylab="AUC" ,ylim=c(0.5,1)); axis(1, at=1:ncol(AUCsl), labels=ModNames) 
+axis(2); box()
+
+boxplot(TP_MATl,axes=FALSE, xlab="Models", ylab="TRUE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(TP_MATl), labels=ModNames) 
+axis(2); box()
+
+boxplot(FP_MATl,axes=FALSE, xlab="Models", ylab="FALSE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(FP_MATl), labels=ModNames) 
+axis(2); box()
+
+
+dev.off()
+
+
+
+#######
+#SMOTE#
+#######
+
+
+simul_data_l<-data.frame(datayl,datax) 
+
+errores_l=as.list(0)
+nbiter=300
+
+nsim=100 # numero de simulaciones para evaluar distribucion de errores
+
+ERRORESl<-matrix(NaN, ncol=6, nrow=nsim) # modelos x simulaciones
+AUCsl<-matrix(NaN, ncol=6, nrow=nsim) # Matrix con las Areas bajo la curva
+TP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por TP_fun
+FP_MATl<-matrix(NaN, ncol=6, nrow=nsim) # Matriz con los true positive calculados por FP_fun
+
+CUTOFF=0.5
+
+for(k in 1:nsim){
+  
+  print(k)
+  n=nrow(simul_data_l)
+  s=sample(n,n/3)
+  dlearn=simul_data_l[-s,]
+  
+  
+  dlearn=SMOTE(datayl~., data = dlearn, k=3)
+ # dlearn<-dlearn[,c(ncol(dlearn):1)]
+  colnames(dlearn)[1]<-"datayl"
+ # cl=dlearn[,1]
+  dtest=simul_data_l[s,]
+  dtest=dtest[complete.cases(dtest),]
+  yobstst=dtest[ ,1]
+  yobstst=as.numeric(yobstst)
+  
+  #DISCRIMINANT ANALYSIS
+  lda_error<-tryCatch(lda(datayl~.,data=dlearn),error=function(e)e,finally="ERROR") # si da error, la prediccion es 0
+  
+  if(any(class(lda_error)=="error")){evdis=rep(0, nrow(dtest)) } else {
+    dis=lda(datayl~.,data=dlearn); 
+    pr.dis<-as.numeric(predict(dis,newdata=dtest,type="prob")$posterior[,"a"])
+    evdis=numeric()#as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+    evdis[pr.dis > CUTOFF]<- 1
+    evdis[pr.dis <= CUTOFF]<- 2 # Acomoda para que las clases sean clasificadas como 1 o 2 segun el cutoff
+    #evdis=as.numeric(predict(dis,newdata=dtest,type="class")$class) # Esto lo uso si clasifico con Majority vote (CUTOFF==0.5)
+  }# When error, assume error in all predictions. Caused by error in lda because no variance
+  
+  #LR
+  glm1<-stepAIC(glm(datayl~., data=dlearn,family=binomial(link="logit")),trace=0)
+  pr.glm<-predict(glm1, newdata=dtest[,-1],type="response")
+  evglm<-numeric()
+  evglm[pr.glm >  CUTOFF]<-2
+  evglm[pr.glm <= CUTOFF]<-1
+  
+  
+  #SVM
+  svmaa=tune(svm,train.x=dlearn[,-1],train.y=dlearn[,1],data=dlearn[,-1])
+  svma=svm(dlearn[,1]~.,data=dlearn[,-1],cost=svmaa$best.model$cost,gamma=svmaa$best.model$gamma,probability=TRUE)
+  pr.svm<- as.numeric(attributes(predict(svma,newdata=dtest,probability=TRUE))$probabilities[,"a"])# Probability for class 1
+  evsvm<-numeric()
+  evsvm[pr.svm > CUTOFF]<-1
+  evsvm[pr.svm <= CUTOFF]<-2
+  
+  #Non lineal
+  #CART
+  arbol=cart(dlearn,dtest,st=F,ms=5,cpopt=0.000001)
+  pr.cart<-arbol$probTest
+  ecart<-numeric()
+  ecart[pr.cart >  CUTOFF]<-1
+  ecart[pr.cart <= CUTOFF]<-2
+  
+  #SAMME
+   samme=lastsamme(dlearn,dtest,nbiter=300,st=F,ms=5,cpopt=0.00001,cutoff=CUTOFF) 
+   evsamme=samme$prevtst
+  
+  #RANDOM FOREST SIMPLE
+  rf=randomForest(y=dlearn[,1],x=dlearn[,-1],data=dlearn,ntree=1000)
+  pr.rf= as.numeric(predict(rf,newdata=dtest,type="prob")[,"a"])
+  evrf<-numeric()
+  evrf[pr.rf >0.5]<-1
+  evrf[pr.rf <= 0.5]<-2 # Aqui no puse el CUTOFF por que sino el metodo es equivalente a rf_cutoff que esta abajo (sirve como una especie de control)
+  
+  
+  
+  ### CALCULOS DE CALIDAD DE AJUSTE
+  
+  errores_l=cbind(LDA=sum(evdis!=yobstst)/nrow(dtest),
+                  SVM=sum(evsvm!=yobstst)/nrow(dtest), 
+                  LR=sum(evglm!=yobstst)/nrow(dtest), 
+                  CART=sum(ecart!=yobstst)/nrow(dtest),
+                                SAMME=sum(evsamme!=yobstst)/nrow(dtest),
+                  RF=sum(evrf!=yobstst)/nrow(dtest))#
+  round(errores_l,2)
+  
+  ERRORESl[k,]<-errores_l
+  
+  # AUC
+  auc_l=c(auc(as.numeric(yobstst),evdis),
+          auc(as.numeric(yobstst),evsvm),
+          auc(as.numeric(yobstst),evglm),
+             auc(as.numeric(yobstst),evsamme),
+          auc(as.numeric(yobstst),ecart),
+          auc(as.numeric(yobstst),evrf))
+  AUCsl[k,]<-auc_l
+  
+  # TRUE POSITIVE
+  truePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$TPR, SVM=TP_fun(yobstst,evsvm)$TPR, 
+                        LR=TP_fun(yobstst,evglm)$TPR,CART=TP_fun(yobstst,ecart)$TPR, 
+                                            SAMME=TP_fun(yobstst,evsamme)$TPR,
+                        RF=TP_fun(yobstst,evrf)$TPR)
+  TP_MATl[k,]<-truePositive_l
+  
+  falsePositive_l= cbind(LDA=TP_fun(yobstst,evdis)$FPR, SVM=TP_fun(yobstst,evsvm)$FPR, LR=TP_fun(yobstst,evglm)$FPR,
+                         CART=TP_fun(yobstst,ecart)$FPR, 
+                                            SAMME=TP_fun(yobstst,evsamme)$FPR, 
+                         RF=TP_fun(yobstst,evrf)$FPR)
+  FP_MATl[k,]<-falsePositive_l
+  
+  
+}# END LOOP      
+
+
+ModNames<-cbind("LDA", "SVM", "LR","CART", "SAMME", "RF")
+#ModNames<-cbind("LDA", "SVM", "LR","CART", "RF")
+
+
+
+MeanAcc<-apply(1-ERRORESl, 2, mean)
+MeanAcc=round(MeanAcc,4)
+SDAcc<-round(apply(1-ERRORESl, 2, sd),2)
+Acctab<-t(data.frame(paste(MeanAcc, SDAcc, sep="Ypm")))
+colnames(Acctab)=ModNames
+rownames(Acctab)=c("ACC")
+
+MeanTP_MAT<-apply(TP_MATl, 2, mean)
+MeanTP_MAT=round(MeanTP_MAT,4)
+SDTP_MAT<-round(apply(TP_MATl, 2, sd),2)
+TPRtab<-t(data.frame(paste(MeanTP_MAT, SDTP_MAT, sep="Ypm")))
+colnames(TPRtab)=ModNames
+rownames(TPRtab)=c("TPR")
+
+MeanFP_MAT<-apply(FP_MATl, 2, mean)
+MeanFP_MAT=round(MeanFP_MAT,4)
+SDFP_MAT<-round(apply(FP_MATl, 2, sd),2)
+FPRtab<-t(data.frame(paste(MeanFP_MAT, SDFP_MAT, sep="Ypm")))
+colnames(FPRtab)=ModNames
+rownames(FPRtab)=c("FPR")
+
+
+MeanAUC<-apply(AUCsl, 2, mean)
+MeanAUC=round(MeanAUC,4)
+SDAUC<-round(apply(AUCsl, 2, sd),2)
+AUCtab<-t(data.frame(paste(MeanAUC, SDAUC, sep="Ypm")))
+colnames(AUCtab)=ModNames
+rownames(AUCtab)=c("AUC")
+
+tabla_smote=rbind(Acctab,AUCtab,TPRtab,FPRtab)
+
+
+fic = paste("ressmote.txt",sep="")
+
+dump(paste("ERRORESl"),file=fic,append=T)
+dump(paste("TP_MATl"),file=fic,append=T)
+dump(paste("FP_MATl"),file=fic,append=T)
+dump(paste("AUCsl"),file=fic,append=T)
+dump(paste("tabla_smote"),file=fic,append=T)
+
+
+
+xtable(tabla_smote,caption = "Tabla smote lineal")
+
+
+
+
+
+
+
+
+x11(height=7, width=8)
+par(mfrow=c(3,1), mar=c(5,4,1,1))
+
+boxplot(ERRORESl, axes=FALSE, xlab="", ylab="Error rate", ylim=c(0,0.5)); axis(1, at=1:ncol(ERRORESl), labels=ModNames) 
+axis(2); box()
+abline(h=0.05, lty=2)
+
+boxplot(AUCsl,axes=FALSE, xlab="", ylab="AUC" ,ylim=c(0.5,1)); axis(1, at=1:ncol(AUCsl), labels=ModNames) 
+axis(2); box()
+
+boxplot(TP_MATl,axes=FALSE, xlab="Models", ylab="TRUE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(TP_MATl), labels=ModNames) 
+axis(2); box()
+
+boxplot(FP_MATl,axes=FALSE, xlab="Models", ylab="FALSE POSITIVE", ylim=c(0,1) ); axis(1, at=1:ncol(FP_MATl), labels=ModNames) 
+axis(2); box()
+
+
+dev.off()
+
+
